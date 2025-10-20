@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="da">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Interaktivt Kunst Canvas — Mørkt / Full-width</title>
+  <style>
+    :root{--bg:#0b0b0d;--panel:#0f1720;--muted:#9ca3af;--accent:#60a5fa}
+    *{box-sizing:border-box}
+    html,body{height:100%;margin:0;background:var(--bg);color:#fff;font-family:Inter, system-ui, -apple-system, Roboto,'Segoe UI', Arial}
+
+    .wrap{display:flex;gap:20px;height:100vh;width:100vw}
+
+    /* LEFT: frame + canvas */
+    .left{flex:3;min-width:600px;position:relative;display:flex;align-items:center;justify-content:center;padding:28px}
+    .frame{
+      width:100%;height:calc(100% - 56px);border-radius:14px;overflow:hidden;position:relative;background:#111
+    }
+    /* background image covers whole frame */
+    .frame .bg{position:absolute;inset:0;background-size:cover;background-position:center;filter:saturate(.98) brightness(.98)}
+
+    /* the white active canvas area (inner) */
+    .frame .active-canvas{
+      position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);background:#fff;border-radius:6px;overflow:hidden;box-shadow:0 8px 30px rgba(2,6,23,.6);
+      /* size will be set from JS to match your background's inner white area */
+      width:60%;height:75%;
+    }
+
+    /* stage inside active canvas where items are placed */
+    .stage{position:relative;width:100%;height:100%;background:transparent}
+
+    /* placed item wrapper */
+    .item{position:absolute;touch-action:none;user-select:none;display:flex;align-items:center;justify-content:center}
+    .item img{display:block;max-width:100%;max-height:100%;pointer-events:none}
+
+    /* resize handles */
+    .handle{position:absolute;width:14px;height:14px;border-radius:3px;background:var(--accent);right:-7px;bottom:-7px;cursor:se-resize;box-shadow:0 2px 6px rgba(0,0,0,.5)}
+
+    /* RIGHT: palette */
+    .right{flex:1;min-width:300px;padding:20px;background:linear-gradient(180deg,#071023 0%, #0b1220 100%);display:flex;flex-direction:column;gap:12px;overflow-y:auto}
+    .panel{background:linear-gradient(180deg,rgba(255,255,255,.02),rgba(255,255,255,.01));border-radius:10px;padding:12px;box-shadow:0 6px 18px rgba(2,6,23,.6);}
+    h3{margin:0 0 8px 0;font-size:16px}
+    .palette-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+    .thumb{width:100%;padding-top:100%;position:relative;border-radius:8px;overflow:hidden;background:#0b1220;border:1px solid rgba(255,255,255,.04);cursor:grab}
+    .thumb img{position:absolute;inset:0;width:100%;height:100%;object-fit:contain}
+
+    /* footer area */
+    .controls{display:flex;gap:8px;align-items:center;margin-top:auto}
+    .btn{background:transparent;border:1px solid rgba(255,255,255,.08);color:var(--muted);padding:8px 10px;border-radius:8px;cursor:pointer}
+    .btn.primary{background:var(--accent);border:none;color:#07203b}
+
+    /* helper text */
+    .muted{color:var(--muted);font-size:13px}
+
+    @media (max-width:1000px){.wrap{flex-direction:column}.left{order:2}.right{order:1;width:100%;min-width:unset}}
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="left">
+      <div class="frame" id="frame">
+        <div id="bg" class="bg" style="background-image: url('Baggrund-ramme.png');"></div>
+        <!-- active canvas: the white inner field where items can be dropped -->
+        <div class="active-canvas" id="activeCanvas">
+          <div class="stage" id="stage"></div>
+        </div>
+      </div>
+    </div>
+
+    <aside class="right">
+      <div class="panel">
+        <h3>Palette (40 elementer)</h3>
+        <div class="muted">Træk elementer ind på det hvide felt</div>
+        <div class="palette-grid" id="paletteGrid"></div>
+      </div>
+
+      <div class="panel">
+        <div class="muted">Upload eller erstat pladsholdere</div>
+        <div style="display:flex;gap:8px;margin-top:8px">
+          <input id="fileLoader" type="file" accept="image/*" multiple style="display:none">
+          <button id="btnLoad" class="btn">Upload</button>
+          <button id="btnClearPalette" class="btn">Nulstil</button>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-top:12px;align-items:center">
+          <input id="bgUpload" type="file" accept="image/*" style="display:none">
+          <button id="btnBg" class="btn">Skift baggrund</button>
+          <button id="exportBtn" class="btn primary">Gem som PNG</button>
+        </div>
+      </div>
+
+      <div class="muted" style="text-align:center;margin-top:8px">Højreklik på et element på canvas for at slette det. Træk i hjørnet for at skalere (proportioner beholdes).</div>
+    </aside>
+  </div>
+
+  <script>
+    /*
+      Implementation notes:
+      - Palette loads Element1.png through Element40.png from the same folder
+      - If images are missing, SVG placeholders will show instead
+      - Items dropped into the active canvas (.stage) can be dragged and resized via the handle.
+      - Resizing keeps aspect ratio.
+      - Export button renders the full frame (bg + active canvas contents) to PNG using a canvas.
+    */
+
+    const PALETTE_COUNT = 40;
+    const paletteGrid = document.getElementById('paletteGrid');
+    const stage = document.getElementById('stage');
+    const activeCanvas = document.getElementById('activeCanvas');
+    const frame = document.getElementById('frame');
+    const bgEl = document.getElementById('bg');
+
+    // helper: create SVG placeholder data URI
+    function svgPlaceholder(text, w=400,h=400,bg='#0b1220',fg='#9ca3af'){
+      const svg = `<svg xmlns='http://www.w3.org/2000/svg' width='${w}' height='${h}' viewBox='0 0 ${w} ${h}'>`+
+        `<rect width='100%' height='100%' fill='${bg}'/>`+
+        `<text x='50%' y='50%' dominant-baseline='middle' text-anchor='middle' fill='${fg}' font-family='Arial, Helvetica, sans-serif' font-size='28'>${text}</text>`+
+        `</svg>`;
+      return 'data:image/svg+xml;utf8,' + encodeURIComponent(svg);
+    }
+
+    // build palette items - reference Element1.png through Element40.png
+    const placeholders = [];
+    for(let i=0;i<PALETTE_COUNT;i++){
+      placeholders.push(`Element${i+1}.png`);
+    }
+
+    function makeThumb(src, idx){
+      const wrap = document.createElement('div');
+      wrap.className = 'thumb';
+      const img = document.createElement('img'); 
+      img.src = src; 
+      img.alt = 'element-'+(idx+1);
+      
+      // fallback to placeholder if image doesn't load
+      img.onerror = function(){
+        this.onerror = null;
+        this.src = svgPlaceholder('Element ' + (idx+1));
+      };
+      
+      wrap.appendChild(img);
+
+      // dragstart
+      wrap.addEventListener('dragstart', (e)=>{
+        e.dataTransfer.setData('text/plain', img.src);
+        e.dataTransfer.effectAllowed = 'copy';
+        // small drag image
+        const crt = img.cloneNode(); crt.style.width='96px'; crt.style.height='96px'; crt.style.objectFit='contain';
+        document.body.appendChild(crt);
+        e.dataTransfer.setDragImage(crt, 48,48);
+        setTimeout(()=>document.body.removeChild(crt),0);
+      });
+      wrap.draggable = true;
+
+      // click to replace single thumb
+      wrap.addEventListener('click', ()=>{
+        const f = document.createElement('input'); f.type='file'; f.accept='image/*';
+        f.onchange = (ev)=>{
+          const file = ev.target.files[0]; if(!file) return;
+          const reader = new FileReader(); reader.onload = ()=>{ img.src = reader.result; };
+          reader.readAsDataURL(file);
+        };
+        f.click();
+      });
+
+      return wrap;
+    }
+
+    placeholders.forEach((src,i)=> paletteGrid.appendChild(makeThumb(src,i)));
+
+    // bulk upload to replace first N placeholders
+    document.getElementById('btnLoad').addEventListener('click', ()=> document.getElementById('fileLoader').click());
+    document.getElementById('fileLoader').addEventListener('change', (e)=>{
+      const files = Array.from(e.target.files).slice(0,PALETTE_COUNT);
+      const imgs = paletteGrid.querySelectorAll('img');
+      files.forEach((file,i)=>{
+        const reader = new FileReader(); reader.onload = ()=>{ imgs[i].src = reader.result; };
+        reader.readAsDataURL(file);
+      });
+    });
+
+    document.getElementById('btnClearPalette').addEventListener('click', ()=>{
+      // reset thumbs to original file references
+      const imgs = paletteGrid.querySelectorAll('img');
+      imgs.forEach((img,i)=>{ 
+        img.src = placeholders[i]; 
+      });
+    });
+
+    // background upload — lets user replace the frame background with their 'Baggrund-ramme' image
+    document.getElementById('btnBg').addEventListener('click', ()=> document.getElementById('bgUpload').click());
+    document.getElementById('bgUpload').addEventListener('change', (e)=>{
+      const f = e.target.files[0]; if(!f) return;
+      const reader = new FileReader(); reader.onload = ()=>{ bgEl.style.backgroundImage = `url(${reader.result})`; };
+      reader.readAsDataURL(f);
+    });
+
+    // enable dropping onto active canvas only
+    activeCanvas.addEventListener('dragover', e=>{ e.preventDefault(); });
+    activeCanvas.addEventListener('drop', e=>{
+      e.preventDefault();
+      const src = e.dataTransfer.getData('text/plain'); if(!src) return;
+      const rect = activeCanvas.getBoundingClientRect();
+      const x = e.clientX - rect.left; const y = e.clientY - rect.top;
+      addItemToStage(src, x, y);
+    });
+
+    // add item
+    let itemId = 0;
+    function addItemToStage(src, x=50, y=50){
+      const wrapper = document.createElement('div'); wrapper.className = 'item'; wrapper.dataset.id = ++itemId;
+      // initial size
+      const W = Math.round(activeCanvas.clientWidth * 0.12);
+      wrapper.style.width = W + 'px'; wrapper.style.height = W + 'px';
+      wrapper.style.left = (x - W/2) + 'px'; wrapper.style.top = (y - W/2) + 'px';
+
+      const img = document.createElement('img'); img.src = src; img.alt = 'item-'+itemId;
+      wrapper.appendChild(img);
+
+      // handle
+      const handle = document.createElement('div'); handle.className = 'handle'; wrapper.appendChild(handle);
+
+      // add to stage
+      stage.appendChild(wrapper);
+
+      makeInteractive(wrapper, img, handle);
+    }
+
+    // make item draggable + resizable with aspect ratio preserved
+    function makeInteractive(wrapper, img, handle){
+      // dragging
+      let isDragging=false, startX=0, startY=0, origX=0, origY=0;
+      wrapper.addEventListener('pointerdown', (e)=>{
+        if(e.target === handle) return; // handle covers resizing
+        isDragging = true; startX = e.clientX; startY = e.clientY; origX = parseFloat(wrapper.style.left) || 0; origY = parseFloat(wrapper.style.top) || 0;
+        wrapper.setPointerCapture(e.pointerId);
+      });
+      window.addEventListener('pointermove', (e)=>{
+        if(!isDragging) return;
+        const dx = e.clientX - startX; const dy = e.clientY - startY;
+        wrapper.style.left = (origX + dx) + 'px'; wrapper.style.top = (origY + dy) + 'px';
+      });
+      window.addEventListener('pointerup', (e)=>{ if(isDragging){ isDragging=false; try{ wrapper.releasePointerCapture(e.pointerId);}catch(_){} }});
+
+      // resizing (handle) — preserve aspect ratio
+      let isResizing=false, rStartX=0, rStartY=0, startW=0, startH=0;
+      handle.addEventListener('pointerdown', (e)=>{
+        e.stopPropagation(); isResizing=true; rStartX = e.clientX; rStartY = e.clientY; startW = wrapper.clientWidth; startH = wrapper.clientHeight; wrapper.setPointerCapture(e.pointerId);
+      });
+      window.addEventListener('pointermove', (e)=>{
+        if(!isResizing) return;
+        const dx = e.clientX - rStartX; // use x movement to scale
+        // maintain aspect ratio (width/height)
+        const ratio = startW / startH;
+        let newW = Math.max(24, startW + dx);
+        let newH = Math.round(newW / ratio);
+        wrapper.style.width = newW + 'px'; wrapper.style.height = newH + 'px';
+      });
+      window.addEventListener('pointerup', (e)=>{ if(isResizing){ isResizing=false; try{ handle.releasePointerCapture(e.pointerId);}catch(_){} }});
+
+      // right-click to delete
+      wrapper.addEventListener('contextmenu', (e)=>{ e.preventDefault(); wrapper.remove(); });
+
+      // double click to reset size to original thumbnail-ish
+      wrapper.addEventListener('dblclick', ()=>{
+        const base = Math.round(activeCanvas.clientWidth * 0.12);
+        wrapper.style.width = base + 'px'; wrapper.style.height = base + 'px';
+      });
+    }
+
+    // allow clicking a palette thumb to add to stage at center
+    paletteGrid.addEventListener('click', (e)=>{
+      const img = e.target.closest('img'); if(!img) return;
+      // add to center of active canvas
+      const rect = activeCanvas.getBoundingClientRect();
+      addItemToStage(img.src, rect.width/2, rect.height/2);
+    });
+
+    // Export: draw frame background + activeCanvas items into a single PNG
+    document.getElementById('exportBtn').addEventListener('click', async ()=>{
+      try{
+        // measure frame size
+        const frameRect = frame.getBoundingClientRect();
+        // create canvas with same pixel dimensions as rendered frame
+        const c = document.createElement('canvas'); c.width = Math.round(frameRect.width); c.height = Math.round(frameRect.height);
+        const ctx = c.getContext('2d');
+
+        // draw background image if present
+        const bgStyle = window.getComputedStyle(bgEl).backgroundImage;
+        if(bgStyle && bgStyle !== 'none'){
+          const m = bgStyle.match(/url\("?(.*?)"?\)/);
+          if(m && m[1]){
+            await drawImageToCanvas(ctx, m[1], 0,0,c.width,c.height);
+          } else {
+            // fallback: solid fill
+            ctx.fillStyle = '#0b0b0d'; ctx.fillRect(0,0,c.width,c.height);
+          }
+        } else { ctx.fillStyle = '#0b0b0d'; ctx.fillRect(0,0,c.width,c.height); }
+
+        // draw each item relative to frame
+        const items = Array.from(stage.querySelectorAll('.item'));
+        for(const it of items){
+          const img = it.querySelector('img');
+          const itemRect = it.getBoundingClientRect();
+          const left = itemRect.left - frameRect.left; const top = itemRect.top - frameRect.top;
+          const w = itemRect.width; const h = itemRect.height;
+          await drawImageToCanvas(ctx, img.src, left, top, w, h);
+        }
+
+        // trigger download
+        const url = c.toDataURL('image/png');
+        const a = document.createElement('a'); a.href = url; a.download = 'baggrund-ramme-export.png'; a.click();
+      }catch(err){ alert('Fejl ved eksport: '+err); }
+    });
+
+    function drawImageToCanvas(ctx, src, x,y,w,h){
+      return new Promise((res)=>{
+        const im = new Image(); im.crossOrigin = 'anonymous'; im.onload = ()=>{ ctx.drawImage(im, x, y, w, h); res(); }; im.onerror = ()=>{ res(); }; im.src = src;
+      });
+    }
+
+    // focus
+    activeCanvas.tabIndex = 0;
+  </script>
+</body>
+</html>
